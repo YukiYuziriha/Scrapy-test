@@ -21,10 +21,8 @@ class AlkotekaSpider(scrapy.Spider):
 
     def start_requests(self) -> Generator[scrapy.Request, None, None]:
         """
-        1. Load config/CLI args.
-        2. Resolve City UUID.
-        3. Load Category URLs -> Extract Slugs.
-        4. Yield API Requests.
+        Kick off the crawl: read config/CLI, resolve city_uuid for region,
+        load categories from file and fire the first list API requests.
         """
         # --- Configuration Loading ---
         config = configparser.ConfigParser()
@@ -102,7 +100,7 @@ class AlkotekaSpider(scrapy.Spider):
             )
 
     def _extract_slug(self, url_or_path: str) -> str | None:
-        """Helper to extract 'vino' from '.../catalog/vino'."""
+        """Tiny helper: take last path segment ('vino' from '/catalog/vino')."""
         # Remove trailing slash
         clean = url_or_path.rstrip("/")
         # Get last segment
@@ -112,9 +110,8 @@ class AlkotekaSpider(scrapy.Spider):
         self, response: scrapy.http.Response, *args: object, **kwargs: object
     ) -> Generator[scrapy.Request, None, None]:
         """
-        Handle List API response.
-        1. Yield Detail requests for products.
-        2. Yield Next Page request.
+        List endpoint handler: fan out detail requests for each product and
+        follow pagination while we still have pages and haven't hit max_pages.
         """
         try:
             data = json.loads(response.text)
@@ -216,7 +213,8 @@ class AlkotekaSpider(scrapy.Spider):
         self, response: scrapy.http.Response
     ) -> Generator[ProductItem, None, None]:
         """
-        Handle Detail API response and map JSON fields to ProductItem.
+        Detail endpoint handler: take one product JSON blob and map it into
+        our ProductItem using small helpers so this method stays readable.
         """
         product = self._get_product_data(response)
         if not product:
@@ -244,6 +242,10 @@ class AlkotekaSpider(scrapy.Spider):
     def _get_product_data(
         self, response: scrapy.http.Response
     ) -> dict[str, Any] | None:
+        """
+        Parse JSON and pull out the product dict from 'results', returning
+        None if the payload is not what we expect.
+        """
         try:
             raw_data = json.loads(response.text)
         except json.JSONDecodeError:
@@ -268,10 +270,12 @@ class AlkotekaSpider(scrapy.Spider):
         return cast(dict[str, Any], product)
 
     def _resolve_slug(self, product: dict[str, Any], list_data: dict[str, Any]) -> str:
+        """Try to get slug from detail JSON, fall back to what list API gave us."""
         slug = product.get("slug") or list_data.get("slug") or ""
         return str(slug)
 
     def _parse_brand(self, product: dict[str, Any]) -> str:
+        """Grab brand name if it exists, otherwise give back empty string."""
         brand_info = product.get("brand")
         if isinstance(brand_info, dict):
             name = brand_info.get("name")
@@ -280,6 +284,10 @@ class AlkotekaSpider(scrapy.Spider):
         return ""
 
     def _parse_title(self, product: dict[str, Any]) -> str:
+        """
+        Build title; if volume is shown on the product but not in the name,
+        append it like 'Name, 0.5 л' (rule from the test task).
+        """
         name_raw = product.get("name")
         name = str(name_raw).strip() if name_raw else ""
         volume_raw = product.get("volume")
@@ -291,6 +299,10 @@ class AlkotekaSpider(scrapy.Spider):
         return volume
 
     def _parse_section(self, product: dict[str, Any]) -> list[str]:
+        """
+        Build section/breadcrumb list by walking category parents from leaf
+        to root.
+        """
         section: list[str] = []
         category = product.get("category")
         while isinstance(category, dict):
@@ -301,6 +313,10 @@ class AlkotekaSpider(scrapy.Spider):
         return [part for part in section if part]
 
     def _parse_price_data(self, product: dict[str, Any]) -> dict[str, Any]:
+        """
+        Build price_data with current/original and 'Скидка X%' when we clearly
+        see that original > current.
+        """
         current = self._to_float(product.get("price"))
         original = self._to_float(product.get("prev_price"))
         if original == 0:
@@ -314,6 +330,10 @@ class AlkotekaSpider(scrapy.Spider):
         return {"current": current, "original": original, "sale_tag": sale_tag}
 
     def _parse_stock(self, product: dict[str, Any]) -> dict[str, Any]:
+        """
+        Turn whatever quantity_total we got (int/float/str) into a sane int
+        and mark in_stock if it's > 0; fall back to 0 on any garbage.
+        """
         count = 0
         count_raw = product.get("quantity_total", 0)
         if isinstance(count_raw, (int, float)):
@@ -326,6 +346,10 @@ class AlkotekaSpider(scrapy.Spider):
         return {"in_stock": count > 0, "count": count}
 
     def _parse_assets(self, product: dict[str, Any]) -> dict[str, Any]:
+        """
+        Map main image into the assets block; 360 and video are left empty
+        because the current API doesn't expose them.
+        """
         main_img_raw = product.get("image_url")
         main_img = str(main_img_raw) if main_img_raw else ""
         set_images = [main_img] if main_img else []
@@ -337,6 +361,10 @@ class AlkotekaSpider(scrapy.Spider):
         }
 
     def _parse_metadata(self, product: dict[str, Any]) -> dict[str, Any]:
+        """
+        Fill metadata: description plus a couple of common fields (country,
+        region, etc.) and everything simple from properties.
+        """
         description = product.get("description")
         desc_text = str(description) if isinstance(description, str) else ""
 
@@ -363,6 +391,7 @@ class AlkotekaSpider(scrapy.Spider):
         return metadata
 
     def _parse_marketing_tags(self, product: dict[str, Any]) -> list[str]:
+        """Turn simple boolean flags into human-readable marketing tags."""
         tags = []
         if product.get("is_new"):
             tags.append("Новинка")
@@ -371,6 +400,7 @@ class AlkotekaSpider(scrapy.Spider):
         return tags
 
     def _parse_spec_value(self, value: object) -> str:
+        """Normalize one characteristic value into a plain string."""
         if isinstance(value, dict) and "name" in value:
             return str(value.get("name", ""))
         if isinstance(value, (str, int, float)):
@@ -378,6 +408,7 @@ class AlkotekaSpider(scrapy.Spider):
         return ""
 
     def _to_float(self, value: object) -> float:
+        """Best-effort conversion to float; anything weird becomes 0.0."""
         if isinstance(value, (int, float)):
             return float(value)
         if isinstance(value, str):
