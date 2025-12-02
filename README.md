@@ -6,6 +6,27 @@ This repository contains a Scrapy project scaffold for parsing products from alk
 - Python 3.10+
 - Scrapy 2.11+
 
+## Setup
+
+1.  **Create and activate a virtual environment:**
+
+    ```bash
+    python3 -m venv .venv
+    source .venv/bin/activate
+    ```
+
+2.  **Install dependencies:**
+
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+3.  **Install pre-commit hooks:**
+
+    ```bash
+    pre-commit install
+    ```
+
 ## Running the spider
 ```
 scrapy crawl alkoteka -O result.json
